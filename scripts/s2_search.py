@@ -469,8 +469,6 @@ Supported columns:
     parser.add_argument('--columns', required=True, help='Comma-separated column names')
     parser.add_argument('--output', help='Output CSV file path (default: stdout)')
     parser.add_argument('--max-results', type=int, default=1000, help='Maximum number of results (default: 1000)')
-    parser.add_argument('--api-key', 
-                       help='Semantic Scholar API key for higher rate limits (or set S2_API_KEY env var)')
     parser.add_argument('--download-pdf', action='store_true', help='Download open access PDFs')
     parser.add_argument('--pdf-dir', default='./pdfs', help='Directory for downloaded PDFs')
     parser.add_argument('--use-relevance-search', action='store_true', 
@@ -490,7 +488,7 @@ Supported columns:
         handlers=handlers
     )
     
-    api_key = args.api_key or os.environ.get('S2_API_KEY') or os.environ.get('SEMANTIC_SCHOLAR_API_KEY')
+    api_key = os.environ.get('S2_API_KEY') or os.environ.get('SEMANTIC_SCHOLAR_API_KEY')
     if api_key:
         logger.info("Using API key for higher rate limits")
     
