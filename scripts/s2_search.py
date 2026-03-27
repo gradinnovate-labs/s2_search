@@ -214,7 +214,7 @@ class S2SearchClient:
                     if api_field == 'authors':
                         api_fields.append('authors')
                     elif api_field == 'openAccessPdf':
-                        api_fields.append('openAccessPdf.url')
+                        api_fields.append('openAccessPdf')
                     else:
                         api_fields.append(api_field)
             else:

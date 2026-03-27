@@ -356,14 +356,8 @@ python scripts/s2_search.py \
 
 For higher rate limits, configure an API key:
 
-**Option 1: Environment variable (recommended)**
 ```bash
 export S2_API_KEY="your_api_key_here"
-```
-
-**Option 2: Command line**
-```bash
-python scripts/s2_search.py --api-key YOUR_API_KEY ...
 ```
 
 **Rate Limits:**
