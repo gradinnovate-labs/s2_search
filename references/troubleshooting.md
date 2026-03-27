@@ -79,7 +79,6 @@ Add `--verbose` to see detailed logs:
 ```bash
 python scripts/s2_search.py \
   --input query.json \
-  --columns "title,authors,venue,year" \
   --verbose
 ```
 
@@ -177,13 +176,33 @@ PDFs may fail to download because they are:
 3. **Temporarily unavailable**: Server issues or broken links
 4. **Large file**: Timeout during download
 
+### ArXiv Fallback (New Feature)
+
+The tool now automatically tries ArXiv as a fallback source:
+
+1. First, attempts to download from `openAccessPdf.url`
+2. If unavailable, checks `externalIds.ArXiv` and tries `https://arxiv.org/pdf/{arxiv_id}`
+
+**Check PDF sources:**
+
+```bash
+python scripts/s2_search.py \
+  --input query.json \
+  --columns "title,pdf_url,pdf_source,arxiv_id" \
+  --output papers_with_sources.csv
+```
+
+The `pdf_source` column shows:
+- `openAccess`: PDF from Semantic Scholar's open access collection
+- `arxiv`: PDF from ArXiv
+
 ### Behavior
 
 The tool:
 - Logs failures to `s2_search.log`
 - Continues processing other papers
 - Does NOT interrupt the search
-- Returns empty string for `open_access_pdf` field
+- Returns empty string for `pdf_url` field if both sources fail
 
 ### Check PDF Availability
 
@@ -193,11 +212,32 @@ Before downloading, check if PDFs exist:
 # First, search without downloading
 python scripts/s2_search.py \
   --input query.json \
-  --columns "title,open_access_pdf" \
+  --columns "title,pdf_url,pdf_source,arxiv_id" \
   --output papers_with_pdfs.csv
 
-# Count how many have PDFs
-grep -v "^$" papers_with_pdfs.csv | wc -l
+# Count how many have PDFs (non-empty pdf_url)
+grep -v ",," papers_with_pdfs.csv | wc -l
+```
+
+Or just check the output directly:
+```bash
+python scripts/s2_search.py \
+  --input query.json \
+  --columns "title,pdf_source" \
+  | grep -c "arxiv\|openAccess"
+```
+
+### Custom PDF Naming
+
+Use `--pdf-naming` to organize downloaded PDFs:
+
+```bash
+python scripts/s2_search.py \
+  --input query.json \
+  --columns "title,arxiv_id" \
+  --download-pdf \
+  --pdf-naming "{index}_{title}" \
+  --pdf-dir ./pdfs
 ```
 
 ### Solutions
@@ -217,17 +257,23 @@ python scripts/s2_search.py \
 
 #### 2. Manual Download
 
-If automatic download fails, use the `open_access_pdf` URL:
+If automatic download fails, use the `pdf_url` column:
 
 ```bash
-# Export PDF URLs
+# Export PDF URLs (includes ArXiv fallback)
 python scripts/s2_search.py \
   --input query.json \
-  --columns "title,open_access_pdf" \
+  --columns "title,pdf_url,arxiv_id" \
   --output papers.csv
 
 # Manually download from URLs in the CSV
 wget -i <(tail -n +2 papers.csv | cut -d',' -f2)
+```
+
+If ArXiv PDFs also fail, try directly:
+```bash
+# Direct ArXiv download using arxiv_id
+wget https://arxiv.org/pdf/2301.12345.pdf
 ```
 
 #### 3. Increase Timeout
@@ -254,7 +300,23 @@ response = self.session.get(pdf_url, timeout=120, stream=True)  # Increase to 12
 "deep reinforcement learning", "Q-learning", "policy gradient"
 ```
 
-### 2. Combine Filters Wisely
+### 2. Use Multi-Keyword Search for Related Terms
+
+When searching for related terms, use `multiSearch` to get better coverage:
+
+```json
+{
+  "keywords": ["LLM", "large language model", "GPT", "chatbot"],
+  "multiSearch": true,
+  "filters": {
+    "year": "2023-2024"
+  }
+}
+```
+
+This searches each keyword independently and merges results with `match_keywords` showing which terms matched.
+
+### 3. Combine Filters Wisely
 
 Too many filters exclude relevant papers:
 
@@ -280,7 +342,21 @@ Too many filters exclude relevant papers:
 }
 ```
 
-### 3. Expand Venue Names
+### 4. Sort by Citation Count for Impact
+
+Use `sort` filter to find influential papers:
+
+```json
+{
+  "keywords": ["transformer"],
+  "filters": {
+    "sort": "citationCount:desc",
+    "year": "2020-"
+  }
+}
+```
+
+### 5. Expand Venue Names
 
 Always include multiple venue name variations:
 
@@ -324,10 +400,10 @@ Use `--verbose` only for debugging:
 
 ```bash
 # Debugging (verbose)
-python scripts/s2_search.py --input query.json --columns "title,year" --verbose
+python scripts/s2_search.py --input query.json --verbose
 
 # Production (quiet, clean output)
-python scripts/s2_search.py --input query.json --columns "title,year" --output results.csv
+python scripts/s2_search.py --input query.json --output results.csv
 ```
 
 ### 7. Validate JSON Input
@@ -346,10 +422,10 @@ jq . query.json
 
 ```bash
 # Use grep to filter results
-python scripts/s2_search.py --input query.json --columns "title,year" | grep "2024"
+python scripts/s2_search.py --input query.json | grep "2024"
 
 # Use wc to count results
-python scripts/s2_search.py --input query.json --columns "title" | wc -l
+python scripts/s2_search.py --input query.json | wc -l
 
 # Pipe to other tools
 python scripts/s2_search.py --input query.json --columns "title,citation_count" | sort -t',' -k2 -nr | head -10

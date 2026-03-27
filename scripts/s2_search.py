@@ -62,7 +62,12 @@ class S2SearchClient:
         'paper_id': 'paperId',
         'paperid': 'paperId',
         'open_access_pdf': 'openAccessPdf',
-        'openaccesspdf': 'openAccessPdf'
+        'openaccesspdf': 'openAccessPdf',
+        'external_ids': 'externalIds',
+        'externalids': 'externalIds',
+        'arxiv_id': 'externalIds',
+        'arxivid': 'externalIds',
+        'doi': 'externalIds'
     }
     
     SUPPORTED_PUBLICATION_TYPES = [
@@ -140,12 +145,13 @@ class S2SearchClient:
         min_citation_count: Optional[int] = None,
         fields: Optional[List[str]] = None,
         max_results: int = 1000,
-        use_bulk: bool = True
+        use_bulk: bool = True,
+        sort: Optional[str] = None
     ) -> List[Dict]:
         
         if fields is None:
             fields = ['paperId', 'title', 'citationCount', 'authors', 'venue', 
-                     'year', 'publicationDate', 'abstract', 'url', 'openAccessPdf']
+                     'year', 'publicationDate', 'abstract', 'url', 'openAccessPdf', 'externalIds']
         
         api_fields = self._map_fields_to_api(fields)
         
@@ -162,6 +168,8 @@ class S2SearchClient:
             params['publicationTypes'] = ','.join(publication_types)
         if min_citation_count:
             params['minCitationCount'] = min_citation_count
+        if sort:
+            params['sort'] = sort
         
         all_papers = []
         endpoint = "/paper/search/bulk" if use_bulk else "/paper/search"
@@ -215,6 +223,8 @@ class S2SearchClient:
                         api_fields.append('authors')
                     elif api_field == 'openAccessPdf':
                         api_fields.append('openAccessPdf')
+                    elif api_field == 'externalIds':
+                        api_fields.append('externalIds')
                     else:
                         api_fields.append(api_field)
             else:
@@ -222,6 +232,9 @@ class S2SearchClient:
         
         if 'paperId' not in api_fields:
             api_fields.insert(0, 'paperId')
+        
+        if 'externalIds' not in api_fields:
+            api_fields.append('externalIds')
         
         return api_fields
     
@@ -314,6 +327,7 @@ def validate_date_format(date_str: str) -> bool:
 def build_search_query(input_data: Dict) -> tuple:
     keywords = input_data.get('keywords', [])
     logic = input_data.get('logic', 'AND').upper()
+    multi_search = input_data.get('multiSearch', False)
     
     if isinstance(keywords, str):
         keywords = [keywords]
@@ -321,7 +335,9 @@ def build_search_query(input_data: Dict) -> tuple:
     if not keywords:
         raise ValidationError("No keywords provided")
     
-    if logic == 'OR':
+    if multi_search:
+        query = None
+    elif logic == 'OR':
         query = ' | '.join(keywords)
     elif logic == 'AND':
         query = ' + '.join(keywords)
@@ -355,7 +371,9 @@ def build_search_query(input_data: Dict) -> tuple:
         except (ValueError, TypeError):
             raise ValidationError(f"Invalid minCitationCount: {min_citation_count}")
     
-    return query, year, venue, publication_types, min_citation_count
+    sort = filters.get('sort')
+    
+    return query, year, venue, publication_types, min_citation_count, sort, keywords, multi_search
 
 
 def safe_get(data: Dict, key: str, default: Any = "") -> Any:
@@ -377,6 +395,57 @@ def format_pdf_url(open_access_pdf: Any) -> str:
     return ""
 
 
+def get_arxiv_id(external_ids: Any) -> Optional[str]:
+    if not isinstance(external_ids, dict):
+        return None
+    return external_ids.get('ArXiv') or external_ids.get('arXiv') or external_ids.get('arxiv')
+
+
+def get_doi(external_ids: Any) -> Optional[str]:
+    if not isinstance(external_ids, dict):
+        return None
+    return external_ids.get('DOI') or external_ids.get('doi')
+
+
+def build_arxiv_pdf_url(arxiv_id: str) -> str:
+    return f"https://arxiv.org/pdf/{arxiv_id}"
+
+
+def get_pdf_url_with_fallback(paper: Dict) -> tuple:
+    """
+    Returns (pdf_url, source) tuple.
+    source is 'openAccess' or 'arxiv' or None
+    """
+    open_access_pdf = paper.get('openAccessPdf')
+    if isinstance(open_access_pdf, dict) and open_access_pdf.get('url'):
+        return open_access_pdf['url'], 'openAccess'
+    
+    arxiv_id = get_arxiv_id(paper.get('externalIds'))
+    if arxiv_id:
+        return build_arxiv_pdf_url(arxiv_id), 'arxiv'
+    
+    return None, None
+
+
+def format_external_ids(external_ids: Any, target: Optional[str] = None) -> str:
+    if not isinstance(external_ids, dict):
+        return ""
+    
+    if target:
+        target_lower = target.lower()
+        if target_lower in ['arxiv', 'arxiv_id']:
+            return external_ids.get('ArXiv', '') or external_ids.get('arXiv', '')
+        elif target_lower == 'doi':
+            return external_ids.get('DOI', '')
+        return str(external_ids.get(target, ''))
+    
+    parts = []
+    for key in ['ArXiv', 'DOI', 'CorpusId', 'MAG', 'ACL', 'PMID', 'PMCID', 'DBLP']:
+        if key in external_ids:
+            parts.append(f"{key}:{external_ids[key]}")
+    return "; ".join(parts)
+
+
 def export_to_csv(papers: List[Dict], columns: List[str], output_path: Optional[str] = None):
     column_mapping = {
         'index': lambda p, i: i + 1,
@@ -394,7 +463,16 @@ def export_to_csv(papers: List[Dict], columns: List[str], output_path: Optional[
         'paper_id': lambda p, i: safe_get(p, 'paperId'),
         'paperid': lambda p, i: safe_get(p, 'paperId'),
         'open_access_pdf': lambda p, i: format_pdf_url(safe_get(p, 'openAccessPdf')),
-        'openaccesspdf': lambda p, i: format_pdf_url(safe_get(p, 'openAccessPdf'))
+        'openaccesspdf': lambda p, i: format_pdf_url(safe_get(p, 'openAccessPdf')),
+        'external_ids': lambda p, i: format_external_ids(safe_get(p, 'externalIds')),
+        'externalids': lambda p, i: format_external_ids(safe_get(p, 'externalIds')),
+        'arxiv_id': lambda p, i: get_arxiv_id(safe_get(p, 'externalIds')) or '',
+        'arxivid': lambda p, i: get_arxiv_id(safe_get(p, 'externalIds')) or '',
+        'doi': lambda p, i: get_doi(safe_get(p, 'externalIds')) or '',
+        'pdf_url': lambda p, i: get_pdf_url_with_fallback(p)[0] or '',
+        'pdfurl': lambda p, i: get_pdf_url_with_fallback(p)[0] or '',
+        'pdf_source': lambda p, i: get_pdf_url_with_fallback(p)[1] or '',
+        'pdfsource': lambda p, i: get_pdf_url_with_fallback(p)[1] or ''
     }
     
     try:
@@ -432,45 +510,206 @@ def export_to_csv(papers: List[Dict], columns: List[str], output_path: Optional[
         raise ValidationError(f"Failed to write CSV: {e}")
 
 
+def export_to_json(papers: List[Dict], columns: List[str], output_path: Optional[str] = None):
+    column_mapping = {
+        'index': lambda p, i: i + 1,
+        'title': lambda p, i: safe_get(p, 'title'),
+        'paper_title': lambda p, i: safe_get(p, 'title'),
+        'citation_count': lambda p, i: safe_get(p, 'citationCount', 0),
+        'citationcount': lambda p, i: safe_get(p, 'citationCount', 0),
+        'authors': lambda p, i: format_authors(safe_get(p, 'authors', [])),
+        'venue': lambda p, i: safe_get(p, 'venue'),
+        'published_date': lambda p, i: safe_get(p, 'publicationDate') or safe_get(p, 'year'),
+        'publicationdate': lambda p, i: safe_get(p, 'publicationDate') or safe_get(p, 'year'),
+        'year': lambda p, i: safe_get(p, 'year'),
+        'abstract': lambda p, i: safe_get(p, 'abstract'),
+        'url': lambda p, i: safe_get(p, 'url'),
+        'paper_id': lambda p, i: safe_get(p, 'paperId'),
+        'paperid': lambda p, i: safe_get(p, 'paperId'),
+        'open_access_pdf': lambda p, i: format_pdf_url(safe_get(p, 'openAccessPdf')),
+        'openaccesspdf': lambda p, i: format_pdf_url(safe_get(p, 'openAccessPdf')),
+        'external_ids': lambda p, i: safe_get(p, 'externalIds', {}),
+        'externalids': lambda p, i: safe_get(p, 'externalIds', {}),
+        'arxiv_id': lambda p, i: get_arxiv_id(safe_get(p, 'externalIds')) or None,
+        'arxivid': lambda p, i: get_arxiv_id(safe_get(p, 'externalIds')) or None,
+        'doi': lambda p, i: get_doi(safe_get(p, 'externalIds')) or None,
+        'pdf_url': lambda p, i: get_pdf_url_with_fallback(p)[0],
+        'pdfurl': lambda p, i: get_pdf_url_with_fallback(p)[0],
+        'pdf_source': lambda p, i: get_pdf_url_with_fallback(p)[1],
+        'pdfsource': lambda p, i: get_pdf_url_with_fallback(p)[1],
+        'match_keywords': lambda p, i: p.get('_match_keywords', [])
+    }
+    
+    result = []
+    for idx, paper in enumerate(papers):
+        row = {}
+        for col in columns:
+            col_lower = col.lower().replace(' ', '_')
+            if col_lower in column_mapping:
+                row[col] = column_mapping[col_lower](paper, idx)
+            else:
+                row[col] = paper.get(col)
+        result.append(row)
+    
+    try:
+        json_str = json.dumps(result, ensure_ascii=False, indent=2)
+        
+        if output_path:
+            output_dir = os.path.dirname(output_path)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(json_str)
+            logger.info(f"Exported {len(papers)} papers to {output_path}")
+        else:
+            print(json_str)
+            logger.info(f"Exported {len(papers)} papers to stdout")
+            
+    except PermissionError:
+        raise ValidationError(f"Permission denied: Cannot write to {output_path}")
+    except Exception as e:
+        raise ValidationError(f"Failed to write JSON: {e}")
+
+
+def sanitize_filename(name: str) -> str:
+    sanitized = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name)
+    sanitized = sanitized.strip(' .')
+    return sanitized[:200] if sanitized else 'unnamed'
+
+
+def build_pdf_filename(template: str, paper: Dict, index: int) -> str:
+    paper_id = safe_get(paper, 'paperId', 'unknown')
+    title = safe_get(paper, 'title', 'untitled')
+    year = safe_get(paper, 'year', '')
+    arxiv_id = get_arxiv_id(safe_get(paper, 'externalIds')) or ''
+    
+    filename = template
+    filename = filename.replace('{index}', str(index + 1).zfill(4))
+    filename = filename.replace('{paperId}', sanitize_filename(paper_id))
+    filename = filename.replace('{paper_id}', sanitize_filename(paper_id))
+    filename = filename.replace('{title}', sanitize_filename(title)[:100])
+    filename = filename.replace('{year}', str(year) if year else 'unknown')
+    filename = filename.replace('{arxivId}', sanitize_filename(arxiv_id) if arxiv_id else 'no_arxiv')
+    filename = filename.replace('{arxiv_id}', sanitize_filename(arxiv_id) if arxiv_id else 'no_arxiv')
+    
+    if not filename.endswith('.pdf'):
+        filename += '.pdf'
+    
+    return filename
+
+
+def multi_keyword_search(
+    client: S2SearchClient,
+    keywords: List[str],
+    year: Optional[str] = None,
+    venue: Optional[List[str]] = None,
+    publication_types: Optional[List[str]] = None,
+    min_citation_count: Optional[int] = None,
+    fields: Optional[List[str]] = None,
+    max_results_per_keyword: int = 500,
+    use_bulk: bool = True,
+    sort: Optional[str] = None
+) -> List[Dict]:
+    """
+    Search each keyword independently and merge results with deduplication.
+    Each paper will have a _match_keywords field listing which keywords matched.
+    """
+    all_papers = {}  # paperId -> paper data
+    
+    for keyword in keywords:
+        logger.info(f"Searching for keyword: {keyword}")
+        papers = client.search_papers(
+            query=keyword,
+            year=year,
+            venue=venue,
+            publication_types=publication_types,
+            min_citation_count=min_citation_count,
+            fields=fields,
+            max_results=max_results_per_keyword,
+            use_bulk=use_bulk,
+            sort=sort
+        )
+        
+        for paper in papers:
+            paper_id = paper.get('paperId')
+            if paper_id:
+                if paper_id in all_papers:
+                    all_papers[paper_id]['_match_keywords'].append(keyword)
+                else:
+                    paper['_match_keywords'] = [keyword]
+                    all_papers[paper_id] = paper
+        
+        logger.info(f"Found {len(papers)} papers for '{keyword}' (total unique: {len(all_papers)})")
+    
+    return list(all_papers.values())
+
+
+DEFAULT_COLUMNS = ['index', 'title', 'authors', 'venue', 'year', 'citation_count', 
+                   'abstract', 'url', 'paper_id', 'open_access_pdf', 'external_ids', 
+                   'arxiv_id', 'doi', 'pdf_url', 'pdf_source']
+
 def main():
     parser = argparse.ArgumentParser(
-        description='Search Semantic Scholar papers and export to CSV',
+        description='Search Semantic Scholar papers and export to CSV/JSON',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example usage:
   # From JSON file
-  s2_search.py --input query.json --columns "title,authors,venue,year" --output results.csv
+  s2_search.py --input query.json --output results.csv
   
   # From JSON string
-  s2_search.py --input '{"keywords":["machine learning"],"logic":"OR"}' --columns "title,year"
+  s2_search.py --input '{"keywords":["machine learning"],"logic":"OR"}' --output-format json
   
-  # Output to stdout
-  s2_search.py --input query.json --columns "title,authors,year"
+  # With specific columns
+  s2_search.py --input query.json --columns "title,authors,year" --output results.csv
+
+  # Multi-keyword independent search with dedup
+  s2_search.py --input '{"keywords":["LLM","large language model"],"multiSearch":true}' --output-format json
+  
+  # Sort by citation count
+  s2_search.py --input '{"keywords":["transformer"],"filters":{"sort":"citationCount:desc"}}' --output results.csv
+
+  # Custom PDF naming
+  s2_search.py --input query.json --download-pdf --pdf-naming "{index}_{title}"
 
 Input JSON format (file or string):
   {
     "keywords": ["machine learning", "deep learning"],
     "logic": "AND",
+    "multiSearch": false,
     "filters": {
       "year": "2020-2024",
       "venue": ["NeurIPS", "ICML"],
       "publicationTypes": ["Conference"],
-      "minCitationCount": 10
+      "minCitationCount": 10,
+      "sort": "citationCount:desc"
     }
   }
 
-Supported columns:
-  index, title, citation_count, authors, venue, published_date, year, abstract, url, paper_id, open_access_pdf
+Default columns (when --columns not specified):
+  index, title, authors, venue, year, citation_count, abstract, url, paper_id,
+  open_access_pdf, external_ids, arxiv_id, doi, pdf_url, pdf_source
+
+All available columns:
+  index, title, citation_count, authors, venue, published_date, year, abstract, url, paper_id, 
+  open_access_pdf, external_ids, arxiv_id, doi, pdf_url, pdf_source, match_keywords
+
+PDF naming template variables:
+  {index}, {paperId}, {title}, {year}, {arxivId}
         """
     )
     
     parser.add_argument('--input', required=True, 
                        help='JSON file path or JSON string with search criteria')
-    parser.add_argument('--columns', required=True, help='Comma-separated column names')
-    parser.add_argument('--output', help='Output CSV file path (default: stdout)')
+    parser.add_argument('--columns', help='Comma-separated column names (default: all columns)')
+    parser.add_argument('--output', help='Output file path (default: stdout)')
+    parser.add_argument('--output-format', choices=['csv', 'json'], default='csv',
+                       help='Output format: csv or json (default: csv)')
     parser.add_argument('--max-results', type=int, default=1000, help='Maximum number of results (default: 1000)')
-    parser.add_argument('--download-pdf', action='store_true', help='Download open access PDFs')
+    parser.add_argument('--download-pdf', action='store_true', help='Download PDFs (with ArXiv fallback)')
     parser.add_argument('--pdf-dir', default='./pdfs', help='Directory for downloaded PDFs')
+    parser.add_argument('--pdf-naming', default='{paperId}.pdf',
+                       help='PDF naming template: {index}, {paperId}, {title}, {year}, {arxivId} (default: {paperId}.pdf)')
     parser.add_argument('--use-relevance-search', action='store_true', 
                        help='Use relevance search instead of bulk search (max 1000 results)')
     parser.add_argument('--verbose', action='store_true', 
@@ -499,25 +738,50 @@ Supported columns:
         input_data = validate_json_input(args.input)
         
         logger.info("Building search query...")
-        query, year, venue, pub_types, min_citations = build_search_query(input_data)
-        logger.info(f"Query: {query}")
+        query, year, venue, pub_types, min_citations, sort, keywords, multi_search = build_search_query(input_data)
+        if query:
+            logger.info(f"Query: {query}")
+        if sort:
+            logger.info(f"Sort: {sort}")
         
-        columns = [col.strip() for col in args.columns.split(',')]
+        if args.columns:
+            columns = [col.strip() for col in args.columns.split(',')]
+        else:
+            columns = DEFAULT_COLUMNS.copy()
+            if multi_search and 'match_keywords' not in columns:
+                columns.append('match_keywords')
         logger.info(f"Columns: {columns}")
         
         client = S2SearchClient(api_key=api_key)
         
         logger.info(f"Searching papers (max {args.max_results} results)...")
-        papers = client.search_papers(
-            query=query,
-            year=year,
-            venue=venue,
-            publication_types=pub_types,
-            min_citation_count=min_citations,
-            fields=columns,
-            max_results=args.max_results,
-            use_bulk=not args.use_relevance_search
-        )
+        
+        if multi_search:
+            logger.info(f"Multi-keyword search mode: {len(keywords)} keywords")
+            papers = multi_keyword_search(
+                client=client,
+                keywords=keywords,
+                year=year,
+                venue=venue,
+                publication_types=pub_types,
+                min_citation_count=min_citations,
+                fields=columns,
+                max_results_per_keyword=args.max_results,
+                use_bulk=not args.use_relevance_search,
+                sort=sort
+            )
+        else:
+            papers = client.search_papers(
+                query=query,
+                year=year,
+                venue=venue,
+                publication_types=pub_types,
+                min_citation_count=min_citations,
+                fields=columns,
+                max_results=args.max_results,
+                use_bulk=not args.use_relevance_search,
+                sort=sort
+            )
         
         if not papers:
             logger.warning("No papers found matching the criteria")
@@ -525,23 +789,30 @@ Supported columns:
             logger.info(f"Found {len(papers)} papers")
         
         if args.output:
-            logger.info(f"Exporting to CSV: {args.output}")
+            logger.info(f"Exporting to {args.output_format.upper()}: {args.output}")
         else:
-            logger.info("Exporting to stdout")
+            logger.info(f"Exporting to stdout as {args.output_format.upper()}")
         
-        export_to_csv(papers, columns, args.output)
+        if args.output_format == 'json':
+            export_to_json(papers, columns, args.output)
+        else:
+            export_to_csv(papers, columns, args.output)
         
         if args.download_pdf and papers:
-            logger.info(f"Downloading PDFs to {args.pdf_dir}...")
+            logger.info(f"Downloading PDFs to {args.pdf_dir} (with ArXiv fallback)...")
             pdf_count = 0
-            for paper in papers:
-                pdf_url = format_pdf_url(safe_get(paper, 'openAccessPdf'))
+            arxiv_count = 0
+            for idx, paper in enumerate(papers):
+                pdf_url, source = get_pdf_url_with_fallback(paper)
                 if pdf_url:
                     paper_id = safe_get(paper, 'paperId')
-                    output_path = os.path.join(args.pdf_dir, f"{paper_id}.pdf")
+                    filename = build_pdf_filename(args.pdf_naming, paper, idx)
+                    output_path = os.path.join(args.pdf_dir, filename)
                     if client.download_pdf(pdf_url, output_path):
                         pdf_count += 1
-            logger.info(f"Downloaded {pdf_count} PDFs")
+                        if source == 'arxiv':
+                            arxiv_count += 1
+            logger.info(f"Downloaded {pdf_count} PDFs ({arxiv_count} from ArXiv)")
         
         logger.info("Search completed successfully!")
         if args.output:
